@@ -37,3 +37,13 @@ jobs:
           TAGS: ${{ inputs.tags }}
           ENVIRONMENT: ${{ inputs.environment }}
 
+  lint:
+    name: Lint
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+      - name: Run terraform fmt check
+        run: terraform fmt -check -diff -recursive ./
