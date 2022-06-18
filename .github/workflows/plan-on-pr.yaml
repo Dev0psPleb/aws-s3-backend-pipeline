@@ -1,0 +1,184 @@
+---
+
+name: Plan / Test on PR
+
+on:
+  push:
+    branches: [development, stage]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: macos-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+
+      - name: Run terraform fmt check
+        run: terraform fmt -check -diff -recursive ./
+
+  plan:
+    name: Plan Production
+    runs-on: macos-latest
+    permissions:
+      id-token: write
+      contents: read
+    if: github.event_name == 'pull_request'
+    environment:
+      name: production
+      url: https://github.com
+    strategy:
+      fail-fast: false
+      matrix:
+        path: [us-east-1, us-east-2, us-west-1, us-west-2]
+        environment: [development]
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Initialize Terraform
+        run: |
+          cd ${{ matrix.path }}
+          terraform -chdir=vpc init -input=false -no-color
+
+      - name: Plan Terraform
+        id: plan
+        env:
+          TF_VAR_environment: production
+        continue-on-error: true
+        run: |
+          cd ${{ matrix.path }}
+          terraform -chdir=vpc plan -input=false -no-color -out=tfplan \
+          && terraform -chdir=vpc show -no-color tfplan
+
+      - name: Reformat Plan
+        run: |
+          echo '${{ steps.plan.outputs.stdout || steps.plan.outputs.stderr }}' \
+          | sed -E 's/^([[:space:]]+)([-+])/\2\1/g' > plan.txt
+
+      - name: Put Plan in Env Var
+        run: |
+          PLAN=$(cat plan.txt)
+          echo "PLAN<<EOF" >> $GITHUB_ENV
+          echo "$PLAN" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Post Plan to GitHub PR
+        uses: mshick/add-pr-comment@v1
+        with:
+          allow-repeats: true
+          repo-token: ${{ secrets.GH_PAT_TOKEN }}
+          repo-token-user-login: 'github-actions[bot]'
+          message: |
+            ## ${{ matrix.path }} plan
+            ```diff
+            + Green
+            - Red
+            ! Orange
+            @@ Pink @@
+            #Gray
+            ${{ env.PLAN }}
+            ```
+
+  build:
+    runs-on: macos-latest
+    outputs:
+      branch: ${{ steps.extract_branch.outputs.branch }}
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2
+
+      - name: Extract branch
+        id: extract_branch
+        run: echo "::set-output name=branch::$(echo ${GITHUB_REF#refs/heads/})"
+
+  deploy-development:
+    needs: build
+    if: github.event_name != 'pull_request' && ${{ needs.build.outputs.branch == 'development' }}
+    runs-on: macos-latest
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: development
+      url: https://github.com
+    strategy:
+      fail-fast: false
+      matrix:
+        path: [us-east-1, us-east-2, us-west-1, us-west-2]
+    steps:
+
+      - name: Checkout Code
+        uses: actions/checkout@v2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Initialize Terraform
+        run: |
+          cd ${{ matrix.path }}
+          terraform -chdir=vpc init -input=false -no-color
+
+      - name: Plan Terraform
+        id: plan
+        env:
+          TF_VAR_environment: development
+        continue-on-error: true
+        run: |
+          cd ${{ matrix.path }}
+          terraform -chdir=vpc plan -input=false -no-color -out=tfplan \
+          && terraform -chdir=vpc show -no-color tfplan
+
+      - name: Reformat Plan
+        run: |
+          echo '${{ steps.plan.outputs.stdout || steps.plan.outputs.stderr }}' \
+          | sed -E 's/^([[:space:]]+)([-+])/\2\1/g' > plan.txt
+
+      - name: Put Plan in Env Var
+        if: steps.plan.outcome == 'success'
+        run: |
+          PLAN=$(cat plan.txt)
+          echo "PLAN<<EOF" >> $GITHUB_ENV
+          echo "$PLAN" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Apply Terraform
+        if: steps.plan.outcome == 'success'
+        id: apply
+        continue-on-error: true
+        run: |
+          cd ${{ matrix.path }}
+          terraform -chdir=vpc apply \
+          -input=false \
+          -no-color \
+          tfplan
+

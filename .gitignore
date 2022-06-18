@@ -1,3 +1,5 @@
+# Ignore quick tests directory
+**/quick_tests
 # Local .terraform directories
 **/.terraform/*
 

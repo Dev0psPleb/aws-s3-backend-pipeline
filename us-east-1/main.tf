@@ -19,15 +19,6 @@ provider "aws" {
 }
 
 provider "aws" {
-  region = var.aws_region
-  assume_role {
-    role_arn     = var.role_arn
-    session_name = var.session_name
-    external_id  = var.external_id
-  }
-}
-
-provider "aws" {
   alias  = "replica"
   region = local.replica_region
 }
@@ -62,27 +53,7 @@ module "remote_state" {
   )
 }
 
-resource "aws_iam_user" "terraform" {
-  name = "TerraformUser"
-}
-
 resource "aws_iam_user_policy_attachment" "remote_state_access" {
-  user       = aws_iam_user.terraform.name
+  user       = data.aws_caller_identity.current.user_id
   policy_arn = module.remote_state.terraform_iam_policy.arn
-}
-
-data "template_file" "backend" {
-  template = file("${path.module}/templates/backend.tf.tpl")
-  vars = {
-    s3_bucket      = module.remote_state.state_bucket.bucket
-    pipeline       = var.pipeline
-    aws_region     = var.aws_region
-    kms_key_id     = module.remote_state.kms_key.key_id
-    dynamodb_table = module.remote_state.dynamodb_table.id
-  }
-}
-
-resource "local_file" "backend" {
-  content  = data.template_file.backend.rendered
-  filename = "../backend.tf"
 }
